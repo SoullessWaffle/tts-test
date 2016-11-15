@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
@@ -8,95 +9,73 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using SpeechLib;
 using System.Text.RegularExpressions;
-using Microsoft.Win32;
+using System.Speech.Synthesis;
 
 namespace TTS_Test
 {
     public partial class TTSTest : Form
     {
-        #region Voice wrapper class
-        private class Voice
+        #region Fields and properties
+        private NativeWindow thisWindow;
+        private Form thisForm;
+
+        private ToolTip formTooltip;
+        private SaveFileDialog saveSpeechDialog;
+        private OpenFileDialog loadTextDialog;
+
+        private string baseTitle;
+        private string _currentSpeechFile;
+        public string CurrentSpeechFile
         {
-            private static readonly Regex voiceInfoRegex = new Regex(@"(?<lang>[^_\-\\\s]+(\-[^_\-\\\s]+)+)_(?<name>[^_\-\\\s]+)_(?<version>\d+(\.\d+)*)$", RegexOptions.Compiled | RegexOptions.ExplicitCapture);
-
-            public SpObjectToken spot;
-            public bool infoFound;
-            public string lang;
-            public string name;
-            public string version;
-
-            public Voice (SpObjectToken spot)
+            get
             {
-                Console.WriteLine("Voice ID: {0}", spot.Id);
-                Console.WriteLine("Key data: {0}", ReadReg(spot.Id));
-                this.spot = spot;
-                this.infoFound = GetVoiceInfo(spot.Id, out this.lang, out this.name, out this.version);
+                return _currentSpeechFile;
             }
-
-            private static object ReadReg (string key)
+            set
             {
-                return Registry.GetValue(key, "", "nuthing");
+                _currentSpeechFile = value;
+                thisForm.Text = baseTitle + $" - {value}" + (SavedStatus ? "" : "*");
             }
+        }
 
-            public static explicit operator ListViewItem (Voice v)
+        private bool _savedStatus;
+        private bool SavedStatus
+        {
+            get
             {
-                return new ListViewItem(new string[] { v.lang, v.name, v.version });
+                return _savedStatus;
             }
-
-            private bool GetVoiceInfo (string id, out string lang, out string name, out string version)
+            set
             {
-                lang = "";
-                name = "";
-                version = "";
-
-                int lastSep = id.LastIndexOf('\\');
-                if (lastSep == -1)
+                if (_savedStatus != value)
                 {
-                    Console.WriteLine("id contains no \\ char: " + id);
-                    return false;
-                }
-                else
-                {
-                    int remainingLength = id.Length - (lastSep + 1);
-                    if (remainingLength < 7)
+                    _savedStatus = value;
+                    if (value)
                     {
-                        // id cannot possibly satisfy the regex
-                        Console.WriteLine("id can't satisfy regex: " + id);
-                        return false;
+                        // Remove asterisk
+                        thisForm.Text = thisForm.Text.Substring(0, thisForm.Text.Length - 1);
                     }
                     else
                     {
-                        Match m = voiceInfoRegex.Match(id, lastSep + 1);
-                        if (!m.Success)
-                        {
-                            Console.WriteLine("id did not satisfy regex: " + id);
-                            return false;
-                        }
-
-                        lang = m.Groups["lang"].ToString();
-                        name = m.Groups["name"].ToString();
-                        version = m.Groups["version"].ToString();
-                        //Console.WriteLine("id satisfied regex, lang {0}, name {1}", lang, name);
-                        return true;
+                        // Add asterisk
+                        thisForm.Text = thisForm.Text + "*";
                     }
                 }
             }
         }
-        #endregion
-
-        #region Fields and properties
-        private NativeWindow thisWindow;
 
         private readonly TimeSpan tts_max_response_time = TimeSpan.FromSeconds(3);
         
         private const int listView_voice_min_column_width = 60;
 
-        private SpVoice voice;
-        private List<Voice> voices;
+        // This has a memory leak :( 
+        // https://connect.microsoft.com/VisualStudio/feedback/details/664196/system-speech-has-a-memory-leak
+        private SpeechSynthesizer Synth;
 
-        public enum SpeechStatus { Idle, Starting, Speaking, Stopping, SwitchingVoice };
+        private List<VoiceInfo> voices;
+
+        public enum SpeechStatus { Idle, Starting, Speaking, Stopping, SwitchingVoice, ChangingRate, ChangingVolume };
 
         private SpeechStatus _status;
         public SpeechStatus Status
@@ -113,6 +92,10 @@ namespace TTS_Test
                 string statusText;
                 if (value == SpeechStatus.SwitchingVoice)
                     statusText = "Switching voice";
+                else if (value == SpeechStatus.ChangingRate)
+                    statusText = "Changing rate";
+                else if (value == SpeechStatus.ChangingVolume)
+                    statusText = "Changing volume";
                 else
                     statusText = value.ToString();
                 textBox_status.Text = statusText;
@@ -140,6 +123,14 @@ namespace TTS_Test
                         LockInputText();
                         break;
                     case SpeechStatus.SwitchingVoice:
+                        LockControls();
+                        LockInputText();
+                        break;
+                    case SpeechStatus.ChangingRate:
+                        LockControls();
+                        LockInputText();
+                        break;
+                    case SpeechStatus.ChangingVolume:
                         LockControls();
                         LockInputText();
                         break;
@@ -189,10 +180,13 @@ namespace TTS_Test
             SpeechText = richTextBox_text.Text;
             CurrentWord = "";
 
-            voice = new SpVoice();
-            voice.StartStream += Voice_StartStream;
-            voice.EndStream += Voice_EndStream;
-            voice.Word += Voice_Word;
+            Synth = new SpeechSynthesizer();
+            Synth.SpeakStarted += Synth_SpeakStarted;
+            Synth.SpeakCompleted += Synth_SpeakCompleted;
+            Synth.SpeakProgress += Synth_SpeakProgress;
+
+            trackBar_rate.Value = Synth.Rate;
+            trackBar_volume.Value = Synth.Volume;
 
             UpdateVoiceList();
             setupDone = true;
@@ -201,34 +195,111 @@ namespace TTS_Test
             Console.WriteLine();
         }
 
+        private void TTSTest_Load (object sender, EventArgs e)
+        {
+            thisForm = Application.OpenForms[0];
+            Console.WriteLine("Form load!");
+            formTooltip = new ToolTip();
+
+            baseTitle = thisForm.Text;
+
+            saveSpeechDialog = new SaveFileDialog()
+            {
+                Filter = "All files (*.*)|*.*|Audio file (*.wav)|*.wav",
+                FilterIndex = 2,
+                Title = "Save Speech"
+            };
+
+            loadTextDialog = new OpenFileDialog()
+            {
+                Filter = "All files (*.*)|*.*|Text file (*.txt)|*.txt",
+                FilterIndex = 2,
+                Title = "Load Text"
+            };
+
+            Panel1MinSize = splitContainer1.Panel1MinSize;
+            thisForm.MinimumSize = new Size(Panel1MinSize + Panel2MaxSize + 10, thisForm.MinimumSize.Height);
+            UpdatePanel1MinSize();
+        }
+
+        private readonly Regex msssttsvRegex = new Regex(@"^Microsoft Server Speech Text to Speech Voice \(\w+\-\w+, (?<name>[^\(\s\)]+)\)$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+        private readonly Regex msdttsRegex = new Regex(@"^Microsoft (?<name>[^\(\s\)]+) Desktop$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+        private string PrettyVoiceName (string voiceName)
+        {
+            Match m = msssttsvRegex.Match(voiceName);
+            if (m.Success)
+                return m.Groups["name"].Value;
+            else
+            {
+                m = msdttsRegex.Match(voiceName);
+                if (m.Success)
+                    return m.Groups["name"].Value;
+                else
+                    return voiceName;
+            }
+        }
+
         private void UpdateVoiceList ()
         {
-            voices = new List<Voice>();
+            VoiceInfo initialVoice = Synth.Voice;
+            Console.WriteLine("Initial voice: {0}", initialVoice.Name);
 
-            ISpeechObjectTokens _vs = voice.GetVoices();
-            for (int i = 0; i < _vs.Count; i++)
+            ReadOnlyCollection<InstalledVoice> installedVoices = Synth.GetInstalledVoices();
+            voices = new List<VoiceInfo>(installedVoices.Count);
+            
+            foreach (InstalledVoice v in installedVoices)
             {
-                voices.Add(new Voice(_vs.Item(i)));
+                if (v.Enabled)
+                {
+                    try
+                    {
+                        Console.WriteLine("---\nTesting {0}...", v.VoiceInfo.Name);
+                        // Test the voice
+                        Synth.SelectVoice(v.VoiceInfo.Name);
+                        Console.WriteLine("{0} works", v.VoiceInfo.Name);
+
+                        // Get the version if it exists
+                        string version;
+                        bool hasVersion = v.VoiceInfo.AdditionalInfo.TryGetValue("Version", out version);
+
+                        voices.Add(v.VoiceInfo);
+                        listView_voice.Items.Add(new ListViewItem(new string[] { v.VoiceInfo.Culture.DisplayName, PrettyVoiceName(v.VoiceInfo.Name), hasVersion ? version : "N/A" }));
+                    }
+                    catch (ArgumentException e)
+                    {
+                        Console.WriteLine("{0} does not work: {1}", v.VoiceInfo.Name, e.Message);
+                    }
+                }
             }
 
-            foreach (Voice v in voices)
+            // Restore the initial voice after testing
+            try
             {
-                //Console.WriteLine("---");
-                //Console.WriteLine("Voice: " + v.spot.Id);
-                //Console.WriteLine("InfoFound: " + v.infoFound);
-                //Console.WriteLine("Lang: " + v.lang);
-                //Console.WriteLine("Name: " + v.name);
-                //Console.WriteLine("Version: " + v.version);
-
-                listView_voice.Items.Add((ListViewItem)v);
+                Console.WriteLine("---\nRestoring initial voice {0}", initialVoice.Name);
+                Synth.SelectVoice(initialVoice.Name);
+            }
+            catch (ArgumentException e)
+            {
+                Console.WriteLine("Unable to restore initial voice {0}: {1}", initialVoice.Name, e.Message);
+                if (voices.Count > 0)
+                {
+                    Console.WriteLine("Falling back to first available voice: {0}", voices[0].Name);
+                    // This shouldn't fail. If it does, there's not much else we can do anyway.
+                    Synth.SelectVoice(voices[0].Name);
+                }
+                else
+                {
+                    Console.WriteLine("No other available voices. Aborting...");
+                    MessageBox.Show(thisWindow, "You do not have any usable Text-To-Speech voices installed.\n\nThe program will now exit.", "No voices available", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Environment.Exit(1);
+                }
             }
 
-            Voice currentVoice = new Voice(voice.Voice);
-            ListViewItem currentListViewItem = listView_voice.Items.Cast<ListViewItem>().First(v => v.SubItems[1].Text == currentVoice.name);
+            // Select the active voice in the listView
+            ListViewItem currentListViewItem = listView_voice.Items[voices.IndexOf(Synth.Voice)];
             currentListViewItem.Selected = true;
 
-            Console.WriteLine("Initially selected voice: {0}", currentListViewItem.SubItems[1].Text);
-
+            // Set the column sizes
             listView_voice.AutoResizeColumns(ColumnHeaderAutoResizeStyle.ColumnContent);
             foreach (ColumnHeader c in listView_voice.Columns)
             {
@@ -238,23 +309,23 @@ namespace TTS_Test
         #endregion
 
         #region TTS events
-        private void Voice_Word (int StreamNumber, object StreamPosition, int CharacterPosition, int Length)
+        private void Synth_SpeakProgress (object sender, SpeakProgressEventArgs e)
         {
-            if (Status == SpeechStatus.SwitchingVoice)
+            if (Status == SpeechStatus.SwitchingVoice || Status == SpeechStatus.ChangingRate || Status == SpeechStatus.ChangingVolume)
                 return;
 
-            CurrentWord = SpeechText.Substring(CharacterPosition, Length);
-            CurrentIndex = CurrentOffset + CharacterPosition;
+            CurrentWord = e.Text;
+            CurrentIndex = CurrentOffset + e.CharacterPosition;
 
             richTextBox_text.SelectionStart = CurrentIndex;
-            richTextBox_text.SelectionLength = Length;
+            richTextBox_text.SelectionLength = e.CharacterCount;
         }
 
-        private void Voice_EndStream (int StreamNumber, object StreamPosition)
+        private void Synth_SpeakCompleted (object sender, SpeakCompletedEventArgs e)
         {
             Console.WriteLine("EndStream event");
 
-            if (Status != SpeechStatus.SwitchingVoice)
+            if (Status != SpeechStatus.SwitchingVoice && Status != SpeechStatus.ChangingRate && Status != SpeechStatus.ChangingVolume)
             {
                 // Either we were stopped manually, or we have finished.
 
@@ -273,9 +344,9 @@ namespace TTS_Test
             stoppedSpeakingHandle.Set();
         }
 
-        private void Voice_StartStream (int StreamNumber, object StreamPosition)
+        private void Synth_SpeakStarted (object sender, SpeakStartedEventArgs e)
         {
-            Console.WriteLine("StartStream event");
+            Console.WriteLine("SpeakStarted event");
 
             startedSpeakingHandle.Set();
         }
@@ -291,6 +362,7 @@ namespace TTS_Test
                 listView_voice.Enabled = false;
                 button_speak.Enabled = false;
                 trackBar_rate.Enabled = false;
+                trackBar_volume.Enabled = false;
             }
         }
 
@@ -302,6 +374,7 @@ namespace TTS_Test
                 listView_voice.Enabled = true;
                 button_speak.Enabled = true;
                 trackBar_rate.Enabled = true;
+                trackBar_volume.Enabled = true;
             }
         }
 
@@ -332,14 +405,20 @@ namespace TTS_Test
 
         public async Task StopSpeaking ()
         {
-            if (Status != SpeechStatus.SwitchingVoice)
+            if (Status == SpeechStatus.Idle)
+                return;
+
+            if (Status != SpeechStatus.SwitchingVoice && Status != SpeechStatus.ChangingRate && Status != SpeechStatus.ChangingVolume)
                 Status = SpeechStatus.Stopping;
 
             Console.WriteLine("StopSpeaking called");
 
+            // TODO: Make this handle handling (heh) and try/catch Timeout block more generic, since we use it quite a bit
+
             // Reset handle
             stoppedSpeakingHandle.Reset();
-            voice.Skip("Sentence", int.MaxValue);
+            // Stop speaking
+            Synth.SpeakAsyncCancelAll();
 
             try
             {
@@ -347,7 +426,7 @@ namespace TTS_Test
                 
                 Console.WriteLine("Stopped speaking");
 
-                if (Status != SpeechStatus.SwitchingVoice)
+                if (Status != SpeechStatus.SwitchingVoice && Status != SpeechStatus.ChangingRate && Status != SpeechStatus.ChangingVolume)
                     Status = SpeechStatus.Idle;
             }
             catch (TaskCanceledException)
@@ -359,7 +438,10 @@ namespace TTS_Test
 
         public async Task StartSpeaking (int offset = 0)
         {
-            if (Status != SpeechStatus.SwitchingVoice)
+            if (Status == SpeechStatus.Speaking)
+                return;
+
+            if (Status != SpeechStatus.SwitchingVoice && Status != SpeechStatus.ChangingRate && Status != SpeechStatus.ChangingVolume)
                 Status = SpeechStatus.Starting;
 
             SpeechText = richTextBox_text.Text;
@@ -375,7 +457,7 @@ namespace TTS_Test
 
             // Reset handle
             startedSpeakingHandle.Reset();
-            voice.Speak(SpeechText, SpeechVoiceSpeakFlags.SVSFlagsAsync);
+            Synth.SpeakAsync(SpeechText);
 
             try
             {
@@ -383,7 +465,7 @@ namespace TTS_Test
                 
                 Console.WriteLine("Started speaking");
 
-                if (Status != SpeechStatus.SwitchingVoice)
+                if (Status != SpeechStatus.SwitchingVoice && Status != SpeechStatus.ChangingRate && Status != SpeechStatus.ChangingVolume)
                     Status = SpeechStatus.Speaking;
             }
             catch (TaskCanceledException)
@@ -393,36 +475,129 @@ namespace TTS_Test
             }
         }
 
-        private async void SwitchVoice (Voice v)
+        private async void SwitchVoice (VoiceInfo v)
         {
-            Console.WriteLine("SwitchVoice to {0}", v.name);
+            Console.WriteLine("SwitchVoice to {0}", v.Name);
 
             switch (Status)
             {
                 case SpeechStatus.Idle:
-                    // Set the voice
-                    voice.Voice = v.spot;
+                    try
+                    {
+                        // Set the voice
+                        Synth.SelectVoice(v.Name);
+
+                        Console.WriteLine("Changed voice to {0}", v.Name);
+                    }
+                    catch (ArgumentException e)
+                    {
+                        Console.WriteLine("Failed to change voice to {0}: {1}", v.Name, e.Message);
+                    }
                     break;
                 case SpeechStatus.Starting:
                     throw new InvalidOperationException("SwitchVoice was somehow called while Status == Starting");
                 case SpeechStatus.Speaking:
                     Status = SpeechStatus.SwitchingVoice;
+
+                    // Stop the speech
                     CurrentOffset = CurrentIndex;
-                    // Stop speaking
                     await StopSpeaking();
+                    
+                    try
+                    {
+                        // Set the voice
+                        Synth.SelectVoice(v.Name);
 
-                    // Set the voice
-                    voice.Voice = v.spot;
-
-                    // Start speaking
-                    await StartSpeaking(CurrentOffset);
-
-                    Status = SpeechStatus.Speaking;
+                        Console.WriteLine("Changed voice to {0}", v.Name);
+                    }
+                    catch (ArgumentException e)
+                    {
+                        Console.WriteLine("Failed to change voice to {0}: {1}", v.Name, e.Message);
+                    }
+                    finally
+                    {
+                        // Start the speech
+                        await StartSpeaking(CurrentOffset);
+                        Status = SpeechStatus.Speaking;
+                    }
                     break;
                 case SpeechStatus.Stopping:
                     throw new InvalidOperationException("SwitchVoice was somehow called while Status == Stopping");
                 case SpeechStatus.SwitchingVoice:
                     throw new InvalidOperationException("SwitchVoice was somehow called while Status == SwitchingVoice");
+                case SpeechStatus.ChangingRate:
+                    throw new InvalidOperationException("SwitchVoice was somehow called while Status == ChangingRate");
+                case SpeechStatus.ChangingVolume:
+                    throw new InvalidOperationException("SwitchVoice was somehow called while Status == ChangingVolume");
+                default:
+                    throw new ArgumentOutOfRangeException("Status");
+            }
+        }
+
+        private async Task SetRate (int rate)
+        {
+            // TODO: Make this and SwitchVoice more generic, since we'll need this for volume too.
+            switch (Status)
+            {
+                case SpeechStatus.Idle:
+                    Synth.Rate = rate;
+                    break;
+                case SpeechStatus.Starting:
+                    throw new InvalidOperationException("SetRate was somehow called while Status == Starting");
+                case SpeechStatus.Speaking:
+                    Status = SpeechStatus.ChangingRate;
+                    CurrentOffset = CurrentIndex;
+
+                    await StopSpeaking();
+
+                    Synth.Rate = rate;
+
+                    await StartSpeaking(CurrentOffset);
+
+                    Status = SpeechStatus.Speaking;
+                    break;
+                case SpeechStatus.Stopping:
+                    throw new InvalidOperationException("SetRate was somehow called while Status == Stopping");
+                case SpeechStatus.SwitchingVoice:
+                    throw new InvalidOperationException("SetRate was somehow called while Status == SwitchingVoice");
+                case SpeechStatus.ChangingRate:
+                    throw new InvalidOperationException("SetRate was somehow called while Status == ChangingRate");
+                case SpeechStatus.ChangingVolume:
+                    throw new InvalidOperationException("SetRate was somehow called while Status == ChangingVolume");
+                default:
+                    throw new ArgumentOutOfRangeException("Status");
+            }
+        }
+
+        private async Task SetVolume (int volume)
+        {
+            switch (Status)
+            {
+                case SpeechStatus.Idle:
+                    Synth.Volume = volume;
+                    break;
+                case SpeechStatus.Starting:
+                    throw new InvalidOperationException("SetVolume was somehow called while Status == Starting");
+                case SpeechStatus.Speaking:
+                    Status = SpeechStatus.ChangingVolume;
+                    CurrentOffset = CurrentIndex;
+
+                    await StopSpeaking();
+
+                    Synth.Volume = volume;
+
+                    await StartSpeaking(CurrentOffset);
+
+                    Status = SpeechStatus.Speaking;
+                    break;
+                case SpeechStatus.Stopping:
+                    throw new InvalidOperationException("SetVolume was somehow called while Status == Stopping");
+                case SpeechStatus.SwitchingVoice:
+                    throw new InvalidOperationException("SetVolume was somehow called while Status == SwitchingVoice");
+                case SpeechStatus.ChangingRate:
+                    throw new InvalidOperationException("SetVolume was somehow called while Status == ChangingRate");
+                case SpeechStatus.ChangingVolume:
+                    throw new InvalidOperationException("SetVolume was somehow called while Status == ChangingVolume");
                 default:
                     throw new ArgumentOutOfRangeException("Status");
             }
@@ -471,6 +646,10 @@ namespace TTS_Test
                     throw new InvalidOperationException("button_speak_Click was somehow called while Status == Stopping");
                 case SpeechStatus.SwitchingVoice:
                     throw new InvalidOperationException("button_speak_Click was somehow called while Status == SwitchingVoice");
+                case SpeechStatus.ChangingRate:
+                    throw new InvalidOperationException("button_speak_Click was somehow called while Status == ChangingRate");
+                case SpeechStatus.ChangingVolume:
+                    throw new InvalidOperationException("button_speak_Click was somehow called while Status == ChangingVolume");
                 default:
                     throw new ArgumentOutOfRangeException("Status");
             }
@@ -482,7 +661,7 @@ namespace TTS_Test
             {
                 ResetFocus();
 
-                Voice selectedVoice = voices.First(v => v.name == e.Item.SubItems[1].Text);
+                VoiceInfo selectedVoice = voices[e.ItemIndex];
                 SwitchVoice(selectedVoice);
             }
         }
@@ -496,34 +675,198 @@ namespace TTS_Test
             ResetFocus();
         }
 
-        private void trackBar_rate_MouseMove (object sender, MouseEventArgs e)
+        private void trackBar_MouseMove (object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
-                MoveTrackBarToMouseClickLocation(trackBar_rate, e.X);
+                MoveTrackBarToMouseClickLocation((TrackBar)sender, e.X);
             }
         }
 
-        private void trackBar_rate_MouseDown (object sender, MouseEventArgs e)
+        private void trackBar_MouseDown (object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
-                MoveTrackBarToMouseClickLocation(trackBar_rate, e.X);
+                MoveTrackBarToMouseClickLocation((TrackBar)sender, e.X);
+            }
+        }
+
+        private void trackBar_ValueChanged (object sender, EventArgs e)
+        {
+            TrackBar s = (TrackBar)sender;
+            Console.WriteLine("Trackbar {0} value changed: {1}", s.Name, s.Value);
+
+            if (s == trackBar_rate)
+            {
+                textBox_rate_value.Text = (trackBar_rate.Value > 0 ? "+" : "") + trackBar_rate.Value.ToString();
+            }
+            else if (s == trackBar_volume)
+            {
+                textBox_volume_value.Text = trackBar_volume.Value.ToString() + "%";
+            }
+        }
+
+        private async void trackBar_rate_MouseUp (object sender, MouseEventArgs e)
+        {
+            ResetFocus();
+
+            if (trackBar_rate.Value != Synth.Rate)
+            {
+                Console.WriteLine("Apply rate change {0} -> {1}", Synth.Rate, trackBar_rate.Value);
+                await SetRate(trackBar_rate.Value);
             }
         }
         #endregion
 
-        private void trackBar_rate_ValueChanged (object sender, EventArgs e)
+        private async void trackBar_volume_MouseUp (object sender, MouseEventArgs e)
         {
-            Console.WriteLine("Trackbar value changed: {0}", trackBar_rate.Value);
+            ResetFocus();
+
+            if (trackBar_volume.Value != Synth.Volume)
+            {
+                Console.WriteLine("Apply volume change {0} -> {1}", Synth.Volume, trackBar_volume.Value);
+                await SetVolume(trackBar_volume.Value);
+            }
         }
 
-        private void trackBar_rate_MouseUp (object sender, MouseEventArgs e)
+        private void splitContainer1_SplitterMoved (object sender, SplitterEventArgs e)
         {
-            if (trackBar_rate.Value != voice.Rate)
+            // Remove focus from splitter
+            ResetFocus();
+
+            //Console.WriteLine("Panel 2 min size: {0}\nPanel 2 size: {1}\n{2}", splitContainer1.Panel2MinSize, splitContainer1.Panel2.Width, splitContainer1.Panel2MinSize <= splitContainer1.Panel2.Width ? "OK" : "WRONG");
+        }
+
+        private int Panel1MinSize;
+        private const int Panel2MaxSize = 500;
+        private void UpdatePanel1MinSize ()
+        {
+            splitContainer1.Panel1MinSize = Math.Max(thisForm.Width - TTSTest.Panel2MaxSize, this.Panel1MinSize);
+        }
+
+        private void TTSTest_Resize (object sender, EventArgs e)
+        {
+            UpdatePanel1MinSize();
+        }
+
+        private void FileDialogCleanup (FileDialog fd)
+        {
+            try
             {
-                Console.WriteLine("Apply rate change {0} -> {1}", voice.Rate, trackBar_rate.Value);
-                voice.Rate = trackBar_rate.Value;
+                string currentDir = System.IO.Path.GetDirectoryName(fd.FileName);
+                if (!string.IsNullOrWhiteSpace(currentDir))
+                {
+                    fd.InitialDirectory = currentDir;
+                    fd.FileName = System.IO.Path.GetFileName(fd.FileName);
+                }
+            }
+            catch (ArgumentException) { }
+        }
+
+        // Save Speech file
+        private async void saveSpeechMenuItem_Click (object sender, EventArgs e)
+        {
+            await SaveSpeechFile();
+        }
+
+        // Save Speech file as
+        private async void saveSpeechAsMenuItem_Click (object sender, EventArgs e)
+        {
+            await SaveSpeechFile(true);
+        }
+
+        private async Task SaveSpeechFile (bool forceDialog = false)
+        {
+            if (forceDialog || string.IsNullOrWhiteSpace(CurrentSpeechFile))
+            {
+                // Show dialog
+                // TODO: Set default filename to textfilename.wav if text was loaded
+                FileDialogCleanup(saveSpeechDialog);
+                if (saveSpeechDialog.ShowDialog(thisWindow) == DialogResult.OK)
+                {
+                    CurrentSpeechFile = saveSpeechDialog.FileName;
+                }
+                else return;
+            }
+
+            // TODO: Don't freeze UI while saving and add better error handling
+            SavedStatus = false;
+            string voicename = Synth.Voice.Name;
+            TTSFResult result = await IOHandler.SaveSpeechFile(CurrentSpeechFile, richTextBox_text.Text, voicename, Synth.Rate, Synth.Volume);
+            if (!result.Success)
+            {
+                if (result.Finished)
+                {
+                    // TTSF error
+                    switch (result.ExitCode)
+                    {
+                        case IOHandler.ExitCode.InvalidArgument:
+                            throw new ArgumentException($"{IOHandler.TTSF} returned exitcode InvalidArgument for arguments {result.Arguments}\n{IOHandler.TTSF} STDOUT: {result.Output}\n\n{IOHandler.TTSF} STDERR: {result.Error}");
+                        case IOHandler.ExitCode.InvalidVoice:
+                            throw new ArgumentException($"{IOHandler.TTSF} returned exitcode InvalidVoice for voice {voicename}\n{IOHandler.TTSF} STDOUT: {result.Output}\n\n{IOHandler.TTSF} STDERR: {result.Error}");
+                        case IOHandler.ExitCode.IOException:
+                            // TODO: More specific error messages
+                            if (MessageBox.Show(thisWindow, "There was a problem saving the speech.\nWould you like to try again?", "Problem Saving Speech", MessageBoxButtons.RetryCancel, MessageBoxIcon.Error) == DialogResult.Retry)
+                            {
+                                SaveSpeechFile().Forget();
+                            }
+                            break;
+                        case IOHandler.ExitCode.UnhandledException:
+                            throw new UnhandledTTSFException(result);
+                        default:
+                            throw new ArgumentOutOfRangeException("result.ExitCode");
+                    }
+                }
+                else if (result.Exception == null)
+                {
+                    // Killed successfully
+                    // TODO: More specific error messages
+                    if (MessageBox.Show(thisWindow, $"There was a problem saving the speech.\nWould you like to try again?", "Problem Saving Speech", MessageBoxButtons.RetryCancel, MessageBoxIcon.Error) == DialogResult.Retry)
+                    {
+                        SaveSpeechFile().Forget();
+                    }
+                }
+                else
+                {
+                    // Not killed successfully
+                    // TODO: More or perhaps less specific error message
+                    if (MessageBox.Show(thisWindow, "There was a problem saving the speech, and the Text-To-Speech-File process has become unresponsive.\nWould you like to try again?", "Problem Saving Speech", MessageBoxButtons.RetryCancel, MessageBoxIcon.Error) == DialogResult.Retry)
+                    {
+                        SaveSpeechFile().Forget();
+                    }
+                }
+            }
+            else
+            {
+                //MessageBox.Show(thisWindow, "All done", "Saving Speech Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SavedStatus = true;
+            }
+        }
+
+        // Load Text file
+        private async void loadTextMenuItem_Click (object sender, EventArgs e)
+        {
+            FileDialogCleanup(loadTextDialog);
+            if (loadTextDialog.ShowDialog(thisWindow) == DialogResult.OK)
+            {
+                WaitCursor wc = new WaitCursor();
+                LockInputText();
+
+                try
+                {
+                    string text = await IOHandler.LoadTextFile(loadTextDialog.FileName);
+                    await StopSpeaking();
+                    richTextBox_text.Text = text;
+                }
+                catch
+                {
+                    Console.WriteLine("Exception happened while loading text file");
+                }
+                finally
+                {
+                    wc.Dispose();
+                    UnlockInputText();
+                }
             }
         }
     }
