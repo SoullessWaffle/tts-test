@@ -58,11 +58,11 @@ namespace TTS_Test
             this.loadTextMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.fileSep1Separator = new System.Windows.Forms.ToolStripSeparator();
             this.saveSpeechMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.saveSpeechAsMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.fileSep2Separator = new System.Windows.Forms.ToolStripSeparator();
             this.exitMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.helpMenu = new System.Windows.Forms.ToolStripMenuItem();
             this.aboutMenuItem = new System.Windows.Forms.ToolStripMenuItem();
-            this.saveSpeechAsMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             ((System.ComponentModel.ISupportInitialize)(this.splitContainer1)).BeginInit();
             this.splitContainer1.Panel1.SuspendLayout();
             this.splitContainer1.Panel2.SuspendLayout();
@@ -417,6 +417,17 @@ namespace TTS_Test
             this.saveSpeechMenuItem.Text = "&Save Speech";
             this.saveSpeechMenuItem.Click += new System.EventHandler(this.saveSpeechMenuItem_Click);
             // 
+            // saveSpeechAsMenuItem
+            // 
+            this.saveSpeechAsMenuItem.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text;
+            this.saveSpeechAsMenuItem.Name = "saveSpeechAsMenuItem";
+            this.saveSpeechAsMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+S";
+            this.saveSpeechAsMenuItem.ShortcutKeys = ((System.Windows.Forms.Keys)(((System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift) 
+            | System.Windows.Forms.Keys.S)));
+            this.saveSpeechAsMenuItem.Size = new System.Drawing.Size(236, 22);
+            this.saveSpeechAsMenuItem.Text = "Save Speech &As...";
+            this.saveSpeechAsMenuItem.Click += new System.EventHandler(this.saveSpeechAsMenuItem_Click);
+            // 
             // fileSep2Separator
             // 
             this.fileSep2Separator.Name = "fileSep2Separator";
@@ -446,17 +457,6 @@ namespace TTS_Test
             this.aboutMenuItem.Name = "aboutMenuItem";
             this.aboutMenuItem.Size = new System.Drawing.Size(214, 22);
             this.aboutMenuItem.Text = "A&bout Text-to-Speech Test";
-            // 
-            // saveSpeechAsMenuItem
-            // 
-            this.saveSpeechAsMenuItem.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text;
-            this.saveSpeechAsMenuItem.Name = "saveSpeechAsMenuItem";
-            this.saveSpeechAsMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+S";
-            this.saveSpeechAsMenuItem.ShortcutKeys = ((System.Windows.Forms.Keys)(((System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift) 
-            | System.Windows.Forms.Keys.S)));
-            this.saveSpeechAsMenuItem.Size = new System.Drawing.Size(236, 22);
-            this.saveSpeechAsMenuItem.Text = "Save Speech &As...";
-            this.saveSpeechAsMenuItem.Click += new System.EventHandler(this.saveSpeechAsMenuItem_Click);
             // 
             // TTSTest
             // 
