@@ -441,6 +441,7 @@ namespace TTS_Test
             this.exitMenuItem.ShortcutKeys = ((System.Windows.Forms.Keys)((System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Q)));
             this.exitMenuItem.Size = new System.Drawing.Size(236, 22);
             this.exitMenuItem.Text = "E&xit";
+            this.exitMenuItem.Click += new System.EventHandler(this.exitMenuItem_Click);
             // 
             // helpMenu
             // 

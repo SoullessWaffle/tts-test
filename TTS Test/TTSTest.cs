@@ -869,5 +869,10 @@ namespace TTS_Test
                 }
             }
         }
+
+        private void exitMenuItem_Click (object sender, EventArgs e)
+        {
+            Application.Exit();
+        }
     }
 }
